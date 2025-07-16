@@ -9,91 +9,68 @@ const morgan = require('morgan');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const session = require('express-session');
-const RedisStore = require('connect-redis').default;
-const redis = require('redis');
 const passport = require('passport');
-const path = require('path');
-const fs = require('fs');
+const RedisStore = require('connect-redis').default;
+const { createClient } = require('redis');
 
-const database = require('./database');
+// Import utilities and middleware
 const logger = require('./utils/logger');
-const errorHandler = require('./middleware/errorHandler');
-const auditLogger = require('./middleware/auditLogger');
-const { setupRoutes } = require('./routes');
+const { errorHandler } = require('./middleware/errorHandler');
+const { auditLogger } = require('./middleware/auditLogger');
+const { setupPassport } = require('./config/passport');
 const { setupSocket } = require('./services/socketService');
 const { setupCronJobs } = require('./services/cronService');
-const { setupPassport } = require('./config/passport');
 const { setupDicomService } = require('./services/dicomService');
+
+// Import routes
+const authRoutes = require('./routes/auth');
+const userRoutes = require('./routes/users');
+const studyRoutes = require('./routes/studies');
+const reportRoutes = require('./routes/reports');
+const organizationRoutes = require('./routes/organizations');
+const billingRoutes = require('./routes/billing');
+const notificationRoutes = require('./routes/notifications');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: process.env.CORS_ORIGIN || "http://localhost:3000",
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
     methods: ["GET", "POST"]
   }
 });
 
-// Create necessary directories
-const createDirectories = () => {
-  const dirs = [
-    './logs',
-    './uploads',
-    './dicom_storage',
-    './temp',
-    './reports'
-  ];
-  
-  dirs.forEach(dir => {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-  });
-};
+// Environment variables
+const PORT = process.env.PORT || 3001;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
 // Redis client setup
-const redisClient = redis.createClient({
-  host: process.env.REDIS_HOST || 'localhost',
-  port: process.env.REDIS_PORT || 6379,
-  password: process.env.REDIS_PASSWORD || undefined,
-  db: process.env.REDIS_DB || 0
+const redisClient = createClient({
+  url: REDIS_URL
 });
 
 redisClient.on('error', (err) => {
-  logger.error('Redis connection error:', err);
+  logger.error('Redis Client Error:', err);
 });
 
-redisClient.connect().catch(console.error);
+redisClient.on('connect', () => {
+  logger.info('Connected to Redis');
+});
+
+// Initialize Redis connection
+redisClient.connect().catch(logger.error);
 
 // Security middleware
 app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'", "ws:", "wss:"],
-      fontSrc: ["'self'"],
-      objectSrc: ["'none'"],
-      mediaSrc: ["'self'"],
-      frameSrc: ["'none'"],
-    },
-  },
+  contentSecurityPolicy: false, // Allow for development
   crossOriginEmbedderPolicy: false
-}));
-
-// CORS configuration
-app.use(cors({
-  origin: process.env.CORS_ORIGIN || "http://localhost:3000",
-  credentials: true,
-  optionsSuccessStatus: 200
 }));
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: (process.env.RATE_LIMIT_WINDOW || 15) * 60 * 1000, // 15 minutes
-  max: process.env.RATE_LIMIT_MAX || 100,
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
@@ -101,124 +78,154 @@ const limiter = rateLimit({
 
 app.use('/api/', limiter);
 
-// Body parsing middleware
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// CORS configuration
+app.use(cors({
+  origin: process.env.FRONTEND_URL || "http://localhost:3000",
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
+
+// Compression and logging
 app.use(compression());
+app.use(morgan('combined', { stream: { write: message => logger.info(message.trim()) } }));
+
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Session configuration
 app.use(session({
   store: new RedisStore({ client: redisClient }),
-  secret: process.env.SESSION_SECRET || 'your-session-secret',
+  secret: process.env.SESSION_SECRET || 'your-secret-key',
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: process.env.NODE_ENV === 'production',
+    secure: NODE_ENV === 'production',
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }
 }));
 
 // Passport configuration
+setupPassport(passport);
 app.use(passport.initialize());
 app.use(passport.session());
-setupPassport(passport);
-
-// Logging middleware
-app.use(morgan('combined', {
-  stream: {
-    write: (message) => logger.info(message.trim())
-  }
-}));
 
 // Audit logging middleware
 app.use(auditLogger);
 
-// Static file serving
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
-app.use('/reports', express.static(path.join(__dirname, '../reports')));
-
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'OK',
+  res.json({ 
+    status: 'OK', 
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    environment: process.env.NODE_ENV || 'development',
-    version: require('../package.json').version
+    environment: NODE_ENV,
+    version: process.env.npm_package_version || '1.0.0'
   });
 });
 
 // API routes
-setupRoutes(app);
+app.use('/api/auth', authRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/studies', studyRoutes);
+app.use('/api/reports', reportRoutes);
+app.use('/api/organizations', organizationRoutes);
+app.use('/api/billing', billingRoutes);
+app.use('/api/notifications', notificationRoutes);
 
-// Socket.IO setup
-setupSocket(io);
-
-// Error handling middleware
-app.use(errorHandler);
+// Static file serving for uploaded files
+app.use('/uploads', express.static('uploads'));
 
 // 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     error: 'Not Found',
-    message: 'The requested resource was not found on this server.'
+    message: 'The requested resource was not found'
   });
 });
+
+// Error handling middleware
+app.use(errorHandler);
+
+// Initialize services
+const initializeServices = async () => {
+  try {
+    logger.info('Initializing services...');
+    
+    // Initialize DICOM service
+    await setupDicomService();
+    
+    // Initialize Socket.IO
+    setupSocket(io);
+    
+    // Initialize cron jobs
+    setupCronJobs();
+    
+    logger.info('All services initialized successfully');
+  } catch (error) {
+    logger.error('Failed to initialize services:', error);
+    process.exit(1);
+  }
+};
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully...');
+const gracefulShutdown = async (signal) => {
+  logger.info(`Received ${signal}, shutting down gracefully...`);
+  
   server.close(() => {
-    logger.info('HTTP server closed.');
-    database.destroy();
+    logger.info('HTTP server closed');
+    
+    // Close Redis connection
     redisClient.quit();
+    
+    // Close database connection
+    const database = require('./database');
+    database.destroy();
+    
+    logger.info('All connections closed');
     process.exit(0);
   });
+  
+  // Force close after 10 seconds
+  setTimeout(() => {
+    logger.error('Could not close connections in time, forcefully shutting down');
+    process.exit(1);
+  }, 10000);
+};
+
+// Handle process signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught Exception:', error);
+  gracefulShutdown('uncaughtException');
 });
 
-process.on('SIGINT', () => {
-  logger.info('SIGINT received, shutting down gracefully...');
-  server.close(() => {
-    logger.info('HTTP server closed.');
-    database.destroy();
-    redisClient.quit();
-    process.exit(0);
-  });
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  gracefulShutdown('unhandledRejection');
 });
 
 // Start server
-const start = async () => {
+const startServer = async () => {
   try {
-    // Create directories
-    createDirectories();
+    await initializeServices();
     
-    // Initialize database
-    await database.migrate.latest();
-    logger.info('Database migrations completed');
-    
-    // Setup DICOM service
-    await setupDicomService();
-    logger.info('DICOM service initialized');
-    
-    // Setup cron jobs
-    setupCronJobs();
-    logger.info('Cron jobs initialized');
-    
-    const PORT = process.env.PORT || 5000;
-    const HOST = process.env.HOST || 'localhost';
-    
-    server.listen(PORT, HOST, () => {
-      logger.info(`Server running on http://${HOST}:${PORT}`);
-      logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    server.listen(PORT, () => {
+      logger.info(`Server running on port ${PORT} in ${NODE_ENV} mode`);
+      logger.info(`Health check available at http://localhost:${PORT}/health`);
+      logger.info(`API documentation available at http://localhost:${PORT}/api-docs`);
     });
-    
   } catch (error) {
     logger.error('Failed to start server:', error);
     process.exit(1);
   }
 };
 
-start();
+startServer();
 
 module.exports = { app, server, io };
