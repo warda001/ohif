@@ -1,0 +1,26 @@
+{
+  "name": "@ohif/extension-dicom-library-datasource",
+  "version": "3.0.0",
+  "description": "DICOM Library data source extension for OHIF Viewer",
+  "author": "OHIF",
+  "license": "MIT",
+  "main": "dist/index.umd.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "repository": "OHIF/Viewers",
+  "keywords": [
+    "ohif-extension",
+    "dicom",
+    "medical",
+    "imaging"
+  ],
+  "peerDependencies": {
+    "@ohif/core": "^3.0.0"
+  },
+  "dependencies": {
+    "dicom-parser": "^1.8.13",
+    "cornerstone-wado-image-loader": "^4.13.3"
+  }
+}
