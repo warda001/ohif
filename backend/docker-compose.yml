@@ -1,0 +1,128 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: radiology-postgres
+    environment:
+      POSTGRES_DB: radiology_platform
+      POSTGRES_USER: radiology_user
+      POSTGRES_PASSWORD: radiology_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U radiology_user -d radiology_platform"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: radiology-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # Backend Application
+  backend:
+    build: .
+    container_name: radiology-backend
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: radiology_platform
+      DB_USER: radiology_user
+      DB_PASSWORD: radiology_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: your-super-secret-jwt-key-change-this-in-production
+      ENCRYPTION_KEY: your-32-character-encryption-key-here
+      ENCRYPTION_IV: your-16-char-iv-here
+      CORS_ORIGIN: http://localhost:3000
+      ENABLE_AUDIT_LOG: true
+      ENABLE_2FA: true
+      ENABLE_EMAIL_NOTIFICATIONS: true
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./dicom_storage:/app/dicom_storage
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: radiology-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+      - ./uploads:/var/www/uploads
+      - ./reports:/var/www/reports
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # DICOM Storage Service (Optional)
+  orthanc:
+    image: osimis/orthanc:latest
+    container_name: radiology-orthanc
+    ports:
+      - "8042:8042"
+      - "4242:4242"
+    environment:
+      ORTHANC__NAME: "Radiology Platform PACS"
+      ORTHANC__DICOM_AET: "RADIOLOGY"
+      ORTHANC__DICOM_PORT: 4242
+      ORTHANC__HTTP_PORT: 8042
+      ORTHANC__POSTGRESQL_HOST: postgres
+      ORTHANC__POSTGRESQL_PORT: 5432
+      ORTHANC__POSTGRESQL_DATABASE: orthanc_db
+      ORTHANC__POSTGRESQL_USERNAME: orthanc_user
+      ORTHANC__POSTGRESQL_PASSWORD: orthanc_password
+    volumes:
+      - orthanc_data:/var/lib/orthanc/db
+      - ./orthanc/orthanc.json:/etc/orthanc/orthanc.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  orthanc_data:
+
+networks:
+  default:
+    driver: bridge
