@@ -21,6 +21,6 @@
   },
   "dependencies": {
     "dicom-parser": "^1.8.13",
-    "cornerstone-wado-image-loader": "^4.13.3"
+    "cornerstone-wado-image-loader": "^4.13.2"
   }
 }
