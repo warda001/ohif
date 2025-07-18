@@ -1,6 +1,6 @@
 [build]
   base = "platform/app"
-  command = "yarn install && yarn build:viewer:ci"
+  command = "yarn install && yarn run build:netlify"
   publish = "dist"
 
 [[redirects]]
@@ -10,3 +10,4 @@
 
 [build.environment]
   NODE_VERSION = "18"
+  NODE_OPTIONS = "--max_old_space_size=4096"
