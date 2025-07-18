@@ -1,7 +1,7 @@
 [build]
-  command = "cd platform/app && yarn install && yarn build:viewer:ci"
-  publish = "platform/app/dist"
-  base = "."
+  base = "platform/app"
+  command = "yarn install && yarn build:viewer:ci"
+  publish = "dist"
 
 [[redirects]]
   from = "/*"
